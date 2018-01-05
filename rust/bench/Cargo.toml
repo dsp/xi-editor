@@ -1,0 +1,11 @@
+[package]
+name = "bench"
+version = "0.1.0"
+authors = ["David Soria Parra <dsp@experimentalworks.net>"]
+
+[dependencies]
+serde = "1.0"
+serde_json = "1.0"
+
+[dependencies.xi-core-lib]
+path = "../core-lib"

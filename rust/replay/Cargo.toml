@@ -1,0 +1,9 @@
+[package]
+name = "xi-replay"
+version = "0.1.0"
+authors = ["David Soria Parra <experimentalworks@gmail.com>"]
+
+[dependencies]
+serde = "1.0"
+serde_json = "1.0"
+lazy_static = "1.0"
