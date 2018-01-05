@@ -26,6 +26,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench"
+version = "0.1.0"
+dependencies = [
+ "serde 1.0.69 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json 1.0.22 (registry+https://github.com/rust-lang/crates.io-index)",
+ "xi-core-lib 0.2.0",
+]
+
+[[package]]
 name = "bincode"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
