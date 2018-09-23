@@ -1,8 +1,11 @@
 #[macro_use]
 extern crate serde_json;
 
+extern crate clap;
 extern crate serde;
 extern crate xi_core_lib;
+
+use clap::{Arg, App, SubCommand};
 use serde::ser::{Serialize, Serializer};
 use std::io::prelude::*;
 use std::io::BufReader;
@@ -124,7 +127,13 @@ impl<T: Serialize> Serialize for RpcRequest<T> {
 }
 
 fn main() {
-    let mut xi = XiCore::new("xi-core");
+
+    let matches = App::new("xi-bench").arg(Arg::with_name("executable")
+        .long("xi_executable")
+        .value_name("EXECUTABLE")
+        .takes_value(true)).get_matches();
+    let xi_executable = matches.value_of("executable").unwrap_or("xi-core");
+    let mut xi = XiCore::new(xi_executable);
     xi.send(rpc::CoreNotification::ClientStarted {
         config_dir: None,
         client_extras_dir: None,
