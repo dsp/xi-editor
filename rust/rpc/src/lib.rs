@@ -200,6 +200,7 @@ struct RpcState<W: Write> {
     timers: Mutex<BinaryHeap<Timer>>,
     needs_exit: AtomicBool,
     is_blocked: AtomicBool,
+    tx_queue: Mutex<VecDeque<Value>>,
 }
 
 /// A structure holding the state of a main loop for handling RPC's.
@@ -214,6 +215,7 @@ impl<W: Write + Send> RpcLoop<W> {
     pub fn new(writer: W) -> Self {
         let rpc_peer = RawPeer(Arc::new(RpcState {
             rx_queue: Mutex::new(VecDeque::new()),
+            tx_queue: Mutex::new(VecDeque::new()),
             rx_cvar: Condvar::new(),
             writer: Mutex::new(writer),
             id: AtomicUsize::new(0),
@@ -347,6 +349,90 @@ impl<W: Write + Send> RpcLoop<W> {
             Err(exit)
         }
     }
+
+    pub fn embedded_mainloop<H>(&mut self, handler: &mut H) -> Result<(), ReadError>
+    where
+        H: Handler,
+    {
+        let peer = self.get_raw_peer();
+        peer.reset_needs_exit();
+        let ctx = RpcCtx { peer: Box::new(peer.clone()) };
+        loop {
+            // next_read, reads an RpcObject from the queue,
+            // self.reader.next() reads it from a JSON string.
+            let read_result = next_read(&peer, handler, &ctx);
+            // json is an RpcObject at this point.
+            let json = match read_result {
+                Ok(json) => json,
+                Err(err) => {
+                    trace_payload("main loop err", &["rpc"], err.to_string());
+                    // finish idle work before disconnecting;
+                    // this is mostly useful for integration tests.
+                    if let Some(idle_token) = peer.try_get_idle() {
+                        handler.idle(&ctx, idle_token);
+                    }
+                    peer.disconnect();
+                    return Err(err);
+                }
+            };
+
+            // Handle Responses
+            if json.is_response() {
+                let id = json.get_id().unwrap();
+                match json.into_response() {
+                    Ok(resp) => {
+                        let resp = resp.map_err(Error::from);
+                        self.peer.handle_response(id, resp);
+                    }
+                    Err(msg) => {
+                        error!("failed to parse response: {}", msg);
+                        self.peer.handle_response(id, Err(Error::InvalidResponse));
+                    }
+                }
+
+                return Ok(())
+            }
+
+            // Handle Requests and Notifications
+            let method = json.get_method().map(String::from);
+            match json.into_rpc::<H::Notification, H::Request>() {
+                Ok(Call::Request(id, cmd)) => {
+                    let _t = trace_block_payload("handle request", &["rpc"], method.unwrap());
+                    let result = handler.handle_request(&ctx, cmd);
+                    peer.respond(result, id);
+                }
+                Ok(Call::Notification(cmd)) => {
+                    let _t = trace_block_payload("handle notif", &["rpc"], method.unwrap());
+                    handler.handle_notification(&ctx, cmd);
+                }
+                Ok(Call::InvalidRequest(id, err)) => peer.respond(Err(err), id),
+                Err(err) => {
+                    trace_payload("read loop exit", &["rpc"], err.to_string());
+                    peer.disconnect();
+                    return Err(ReadError::UnknownRequest(err));
+                }
+            }
+        }
+    }
+
+    pub fn send_message<R>(&mut self, input: &mut R)
+    where
+        R: BufRead,
+    {
+        let json = match self.reader.next(input) {
+            Ok(json) => json,
+            Err(err) => {
+                if self.peer.0.is_blocked.load(Ordering::Acquire) {
+                    error!("failed to parse response json: {}", err);
+                    self.peer.disconnect();
+                }
+                self.peer.put_rx(Err(err));
+                return;
+            }
+        };
+
+
+    }
 }
 
 /// Returns the next read result, checking for idle work when no
@@ -443,12 +529,16 @@ impl<W: Write + Send + 'static> Peer for RawPeer<W> {
     }
 }
 
+
+
 impl<W: Write> RawPeer<W> {
     fn send(&self, v: &Value) -> Result<(), io::Error> {
         let _trace = trace_block("send", &["rpc"]);
         let mut s = serde_json::to_string(v).unwrap();
         s.push('\n');
-        self.0.writer.lock().unwrap().write_all(s.as_bytes())
+        self.0.tx_queue.lock().unwrap().push_back(v.clone());
+        Ok(())
+//        self.0.writer.lock().unwrap().write_all(s.as_bytes())
         // Technically, maybe we should flush here, but doesn't seem to be required.
     }
 
@@ -513,6 +603,12 @@ impl<W: Write> RawPeer<W> {
     fn put_rx(&self, json: Result<RpcObject, ReadError>) {
         let mut queue = self.0.rx_queue.lock().unwrap();
         queue.push_back(json);
+        self.0.rx_cvar.notify_one();
+    }
+
+    fn put_rx_front(&self, json: Result<RpcObject, ReadError>) {
+        let mut queue = self.0.rx_queue.lock().unwrap();
+        queue.push_front(json);
         self.0.rx_cvar.notify_one();
     }
 
