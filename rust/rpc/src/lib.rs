@@ -201,6 +201,7 @@ struct RpcState<W: Write> {
     needs_exit: AtomicBool,
     is_blocked: AtomicBool,
     tx_queue: Mutex<VecDeque<Value>>,
+    tx_cvar: Condvar,
 }
 
 /// A structure holding the state of a main loop for handling RPC's.
@@ -217,6 +218,7 @@ impl<W: Write + Send> RpcLoop<W> {
             rx_queue: Mutex::new(VecDeque::new()),
             tx_queue: Mutex::new(VecDeque::new()),
             rx_cvar: Condvar::new(),
+            tx_cvar: Condvar::new(),
             writer: Mutex::new(writer),
             id: AtomicUsize::new(0),
             pending: Mutex::new(BTreeMap::new()),
@@ -419,8 +421,15 @@ impl<W: Write + Send> RpcLoop<W> {
     where
         R: BufRead,
     {
-        let json = match self.reader.next(input) {
-            Ok(json) => json,
+        match self.reader.next(input) {
+            Ok(rpcobj) => {
+                // prioritize responses
+                if rpcobj.is_response() {
+                    self.peer.put_rx_front(Ok(rpcobj));
+                } else {
+                    self.peer.put_rx(Ok(rpcobj));
+                }
+            },
             Err(err) => {
                 if self.peer.0.is_blocked.load(Ordering::Acquire) {
                     error!("failed to parse response json: {}", err);
@@ -430,8 +439,17 @@ impl<W: Write + Send> RpcLoop<W> {
                 return;
             }
         };
+    }
 
+    /// Returns the next Value. Blocks until a value is available.
 
+    pub fn next_receive_wait(&mut self) -> Value
+    {
+        loop {
+            if let Some(result) = self.peer.get_tx_timeout(MAX_IDLE_WAIT) {
+                return result;
+            }
+        }
     }
 }
 
@@ -534,9 +552,10 @@ impl<W: Write + Send + 'static> Peer for RawPeer<W> {
 impl<W: Write> RawPeer<W> {
     fn send(&self, v: &Value) -> Result<(), io::Error> {
         let _trace = trace_block("send", &["rpc"]);
-        let mut s = serde_json::to_string(v).unwrap();
-        s.push('\n');
+        // let mut s = serde_json::to_string(v).unwrap();
+        // s.push('\n');
         self.0.tx_queue.lock().unwrap().push_back(v.clone());
+        self.0.tx_cvar.notify_one();
         Ok(())
 //        self.0.writer.lock().unwrap().write_all(s.as_bytes())
         // Technically, maybe we should flush here, but doesn't seem to be required.
@@ -586,6 +605,18 @@ impl<W: Write> RawPeer<W> {
     /// Get a message from the receive queue if available.
     fn try_get_rx(&self) -> Option<Result<RpcObject, ReadError>> {
         let mut queue = self.0.rx_queue.lock().unwrap();
+        queue.pop_front()
+    }
+
+    fn try_get_tx(&self) -> Option<Value> {
+        let mut queue = self.0.tx_queue.lock().unwrap();
+        queue.pop_front()
+    }
+
+    fn get_tx_timeout(&self, dur: Duration) -> Option<Value> {
+        let mut queue = self.0.tx_queue.lock().unwrap();
+        let result = self.0.tx_cvar.wait_timeout(queue, dur).unwrap();
+        queue = result.0;
         queue.pop_front()
     }
 
