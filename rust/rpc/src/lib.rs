@@ -36,6 +36,7 @@ extern crate log;
 
 mod error;
 mod parse;
+mod utils;
 
 pub mod test_utils;
 
@@ -54,6 +55,7 @@ use serde_json::Value;
 use xi_trace::{trace, trace_block, trace_block_payload, trace_payload};
 
 pub use crate::error::{Error, ReadError, RemoteError};
+pub use crate::utils::{value_to_string};
 use crate::parse::{Call, MessageReader, Response, RpcObject};
 
 /// The maximum duration we will block on a reader before checking for an task.
@@ -442,7 +444,6 @@ impl<W: Write + Send> RpcLoop<W> {
     }
 
     /// Returns the next Value. Blocks until a value is available.
-
     pub fn next_receive_wait(&mut self) -> Value
     {
         loop {
@@ -546,8 +547,6 @@ impl<W: Write + Send + 'static> Peer for RawPeer<W> {
         self.0.timers.lock().unwrap().push(Timer { fire_after: after, token });
     }
 }
-
-
 
 impl<W: Write> RawPeer<W> {
     fn send(&self, v: &Value) -> Result<(), io::Error> {
