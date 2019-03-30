@@ -3,8 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
+// //     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -59,6 +58,38 @@ use crate::parse::{Call, MessageReader, Response, RpcObject};
 /// The maximum duration we will block on a reader before checking for an task.
 const MAX_IDLE_WAIT: Duration = Duration::from_millis(5);
 
+
+trait PeerCom {
+    pub fn read(&mut self) -> Result<Value, Error>;
+    pub fn write(&mut self, val: &Value) -> Result<()>;
+}
+
+pub struct IOPeerCom<W, RF> {
+    writer: W,
+    readfn: RF,
+}
+
+impl<W: Write + Send, RF Send + FnOnce() -> R> IOPeerCom<W> {
+    pub fn new(reader: RF, writer: W) -> Self {
+        Self {
+            writer: writer,
+            readfn: reader,
+            reader: MessageReader::default(),
+        }
+    }
+}
+
+impl PeerComm for IOPeerCom<W, RF> {
+    pub fn read(&mut self) -> Result<Value, ReadError>{
+        let mut stream = self.readfn();
+        self.reader.next(&mut stream)
+    }
+
+    pub fn write(&mut self) -> Result<Value, ReadError>{
+        let mut stream = self.readfn();
+        self.reader.next(&mut stream)
+    }
+}
 /// An interface to access the other side of the RPC channel. The main purpose
 /// is to send RPC requests and notifications to the peer.
 ///
@@ -67,7 +98,7 @@ const MAX_IDLE_WAIT: Duration = Duration::from_millis(5);
 ///
 /// In general, `RawPeer` shouldn't be used directly, but behind a pointer as
 /// the `Peer` trait object.
-pub struct RawPeer<W: Write + 'static>(Arc<RpcState<W>>);
+pub struct RawPeer(Arc<RpcState<PeerCom>>);
 
 /// The `Peer` trait represents the interface for the other side of the RPC
 /// channel. It is intended to be used behind a pointer, a trait object.
@@ -207,6 +238,7 @@ pub struct RpcLoop<W: Write + 'static> {
     reader: MessageReader,
     peer: RawPeer<W>,
 }
+
 
 impl<W: Write + Send> RpcLoop<W> {
     /// Creates a new `RpcLoop` with the given output stream (which is used for
